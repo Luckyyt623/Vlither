@@ -1,0 +1,207 @@
+name: Build and Release PC
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  PREMAKE_VERSION: 5.0.0-beta2
+  SLANG_VERSION: 2024.14.3
+
+jobs:
+  # SPIR-V shaders are platform independent, so compile them once on Linux
+  # and share them with the Linux and Windows builds.
+  shaders:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.ver.outputs.version }}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Check required assets
+        run: |
+          for f in app/res/textures/background_4k.png app/res/textures/tex_atlas_8k.png; do
+            if [ ! -f "$f" ]; then
+              echo "::error::Missing $f - commit the textures folder to the repo"
+              exit 1
+            fi
+          done
+
+      - name: Read version from project.lua
+        id: ver
+        run: |
+          VERSION=$(grep -oP 'APP_VERSION=\\"\K[^\\]+' project.lua)
+          if [ -z "$VERSION" ]; then
+            echo "::error::APP_VERSION not found in project.lua"
+            exit 1
+          fi
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "App version: $VERSION"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install Slang shader compiler
+        run: |
+          wget -q "https://github.com/shader-slang/slang/releases/download/v${SLANG_VERSION}/slang-${SLANG_VERSION}-linux-x86_64.tar.gz" -O slang.tar.gz
+          tar -xzf slang.tar.gz
+          SLANG_DIR=$(find . -maxdepth 2 -name slangc -type f | head -1 | xargs dirname)
+          SLANG_DIR=$(realpath "$SLANG_DIR")
+          printf '#!/bin/sh\nexport LD_LIBRARY_PATH="%s:$LD_LIBRARY_PATH"\nexec "%s/slangc" "$@"\n' "$SLANG_DIR" "$SLANG_DIR" > /tmp/slangc_wrapper.sh
+          sudo mv /tmp/slangc_wrapper.sh /usr/local/bin/slangc
+          sudo chmod +x /usr/local/bin/slangc
+          slangc -v
+
+      - name: Compile shaders
+        run: python3 build.py 2
+
+      - name: Upload shaders
+        uses: actions/upload-artifact@v4
+        with:
+          name: shaders
+          path: app/res/shaders/bin
+
+  build-linux:
+    needs: shaders
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download shaders
+        uses: actions/download-artifact@v4
+        with:
+          name: shaders
+          path: app/res/shaders/bin
+
+      - name: Install dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential libvulkan-dev libx11-dev libxrandr-dev libxinerama-dev libxcursor-dev libxi-dev libxkbcommon-dev
+
+      - name: Install Premake
+        run: |
+          wget -q "https://github.com/premake/premake-core/releases/download/v${PREMAKE_VERSION}/premake-${PREMAKE_VERSION}-linux.tar.gz" -O premake.tar.gz
+          tar -xzf premake.tar.gz
+          sudo mv premake5 /usr/local/bin/premake5
+          premake5 --version
+
+      - name: Build (release)
+        run: |
+          export VULKAN_SDK=/usr
+          premake5 --file=project.lua gmake
+          make -C build/makefiles config=release_linux -j"$(nproc)"
+
+      - name: Package
+        env:
+          VERSION: ${{ needs.shaders.outputs.version }}
+        run: |
+          NAME="vlither-pc-v${VERSION}-linux"
+          mkdir -p "$NAME/app/res/shaders"
+          cp build/bin/linux_x86_64_release/app "$NAME/vlither"
+          cp -r app/res/fonts app/res/textures "$NAME/app/res/"
+          cp -r app/res/shaders/bin "$NAME/app/res/shaders/"
+          cp LICENSE "$NAME/"
+          zip -r "$NAME.zip" "$NAME"
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: pc-linux
+          path: vlither-pc-*.zip
+
+  build-windows:
+    needs: shaders
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download shaders
+        uses: actions/download-artifact@v4
+        with:
+          name: shaders
+          path: app/res/shaders/bin
+
+      - name: Set up MSYS2 (mingw-w64)
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: false
+          install: >-
+            make
+            zip
+            unzip
+            curl
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-vulkan-headers
+            mingw-w64-x86_64-vulkan-loader
+
+      - name: Install Premake
+        run: |
+          curl -L -o premake.zip "https://github.com/premake/premake-core/releases/download/v${PREMAKE_VERSION}/premake-${PREMAKE_VERSION}-windows.zip"
+          unzip -o premake.zip premake5.exe
+          ./premake5.exe --version
+
+      - name: Build (release)
+        run: |
+          export VULKAN_SDK="$(cygpath -m /mingw64)"
+          ./premake5.exe --file=project.lua gmake
+          make -C build/makefiles config=release_windows -j"$(nproc)"
+
+      - name: Package
+        env:
+          VERSION: ${{ needs.shaders.outputs.version }}
+        run: |
+          NAME="vlither-pc-v${VERSION}-windows"
+          mkdir -p "$NAME/app/res/shaders"
+          cp build/bin/windows_x86_64_release/app.exe "$NAME/vlither.exe"
+          cp -r app/res/fonts app/res/textures "$NAME/app/res/"
+          cp -r app/res/shaders/bin "$NAME/app/res/shaders/"
+          cp LICENSE "$NAME/"
+          zip -r "$NAME.zip" "$NAME"
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: pc-windows
+          path: vlither-pc-*.zip
+
+  release:
+    needs: [shaders, build-linux, build-windows]
+    if: github.event_name != 'pull_request'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download packages
+        uses: actions/download-artifact@v4
+        with:
+          pattern: pc-*
+          merge-multiple: true
+          path: dist
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ needs.shaders.outputs.version }}
+        run: |
+          TAG="v${VERSION}"
+          ls -la dist
+          if ! gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" \
+              --target "$GITHUB_SHA" \
+              --title "Vlither PC v${VERSION}" \
+              --notes "Vlither PC v${VERSION}"
+          fi
+          gh release upload "$TAG" dist/*.zip --repo "$GITHUB_REPOSITORY" --clobber
