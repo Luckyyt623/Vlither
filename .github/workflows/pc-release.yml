@@ -148,22 +148,19 @@ jobs:
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-vulkan-headers
             mingw-w64-x86_64-vulkan-loader
-            mingw-w64-x86_64-tools-git
 
-      # The MSYS2 vulkan-loader package does not ship an import library that
-      # "-lvulkan-1" can find, so generate one from the loader DLL.
-      - name: Create Vulkan import library
+      # project.lua links the Windows app with -static, and in that mode the
+      # linker skips "libvulkan-1.dll.a" import libraries. It does accept a
+      # "vulkan-1.lib", which is also what the README asks for.
+      - name: Create vulkan-1.lib
         run: |
-          pacman -Ql mingw-w64-x86_64-vulkan-loader | grep -i -E '\.(a|dll|lib)$' || true
-          DLL=$(find /mingw64/bin -iname '*vulkan*.dll' | head -1)
-          if [ -z "$DLL" ]; then
-            echo "::error::Vulkan loader DLL not found in /mingw64/bin"
+          if [ ! -f /mingw64/lib/libvulkan-1.dll.a ]; then
+            echo "::error::libvulkan-1.dll.a not found in /mingw64/lib"
+            pacman -Ql mingw-w64-x86_64-vulkan-loader
             exit 1
           fi
-          echo "Using $DLL"
-          gendef - "$DLL" > vulkan-1.def
-          dlltool -d vulkan-1.def -D vulkan-1.dll -l /mingw64/lib/libvulkan-1.dll.a
-          ls -la /mingw64/lib/libvulkan-1.dll.a
+          cp /mingw64/lib/libvulkan-1.dll.a /mingw64/lib/vulkan-1.lib
+          ls -la /mingw64/lib/vulkan-1.lib
 
       - name: Install Premake
         run: |
