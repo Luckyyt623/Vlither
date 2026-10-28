@@ -5864,7 +5864,8 @@ void ImGui::RenderArrow(ImDrawList* draw_list, ImVec2 pos, ImU32 col, ImGuiDir d
         break;
     }
 
-    draw_list->AddPolyline((ImVec2[]){center + b, center + a, center + c}, 3, col, ImDrawFlags_None, 2);
+    ImVec2 poly[3] = { center + b, center + a, center + c };
+    draw_list->AddPolyline(poly, 3, col, ImDrawFlags_None, 2);
 }
 
 void ImGui::RenderBullet(ImDrawList* draw_list, ImVec2 pos, ImU32 col)
